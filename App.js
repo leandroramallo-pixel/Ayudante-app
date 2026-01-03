@@ -1,12 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
-import * as Clipboard from 'expo-clipboard'; // <--- ¡ACÁ PEGÁS ESTA LÍNEA NUEVA!
 import { useFonts } from 'expo-font';
-import React, { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
-  Alert,
+  ActivityIndicator,
+  Alert, // <--- EL NUEVO QUE FALTABA
+  FlatList,
   Image,
   LayoutAnimation,
   Linking,
+  Modal,
   Platform,
   SafeAreaView,
   ScrollView,
@@ -25,6 +27,8 @@ if (Platform.OS === 'android') {
     UIManager.setLayoutAnimationEnabledExperimental(true);
   }
 }
+
+
 
 // --- SEGURIDAD ---
 const ACCESS_PIN = "2025"; // PIN DE ACCESO
@@ -1638,7 +1642,7 @@ if (!isAuthenticated) {
         <StatusBar backgroundColor={COLORS.primaryDark} barStyle="light-content" />
         <View style={styles.loginContent}>
         <Image
-            source={require('./assets/icon.png')} // <--- Asegurate que el nombre coincida
+            source={require('./assets/icon.png')}
             style={styles.loginLogoImage}
             resizeMode="contain"
           />          <Text style={styles.loginTitle}>APP - Ayudante de Inspección</Text>
@@ -1851,88 +1855,348 @@ function ScreenInfracciones({ db }) {
   );
 }
 
-// --- PANTALLA HERRAMIENTAS (MODIFICADA CON PORTAPAPELES) ---
+// --- PANTALLA HERRAMIENTAS (MEJORADA CON HISTORIAL) ---
 function ScreenHerramientas() {
   const [patente, setPatente] = useState('');
+  const [historial, setHistorial] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [modalVisible, setModalVisible] = useState(false);
+  const [listaAntecedentes, setListaAntecedentes] = useState([]);
 
-  // Notá que agregamos la palabra 'async' antes del paréntesis
-  const handleSearch = async (type) => {
-    if(!patente) return Alert.alert("Atención", "Ingresá una patente.");
-    
-    // Limpiamos la patente
-    const p = patente.toUpperCase().trim();
-    
-    if(type === 'drive') {
-       // 1. COPIAR AL PORTAPAPELES
-       await Clipboard.setStringAsync(p);
-       
-       // 2. AVISAR AL USUARIO (Opcional, pero recomendado)
-       Alert.alert("¡Dominio Copiado!", "Mantené apretado en el buscador de Drive para pegar.");
+  // LOGICA RTO
+  const consultarRTO = async () => {
+    if (!patente) return Alert.alert("Atención", "Ingresá una patente primero.");
+    setLoading(true);
 
-       // 3. ABRIR DRIVE
-       // Usamos tu ID de carpeta. Al abrirse, el usuario pega lo que copiamos arriba.
-       const folderId = "1f9tZzehoyRKWppGrIRnG7snAooyjQtwN"; 
-       
-       // Truco: Si querés que busque directo, mantené este link. 
-       // Si falla la búsqueda directa, el usuario ya tiene el texto copiado para pegarlo manual.
-       const urlDirecta = `https://drive.google.com/drive/folders/${folderId}?q=${encodeURIComponent(p)}`;
-       
-       Linking.openURL(urlDirecta);
+    try {
+      const formData = new FormData();
+      formData.append('dominio', patente);
+      formData.append('enviado', 'true');
+      formData.append('enviar', 'Consultar');
+
+      const response = await fetch('https://www.cent.utn.edu.ar/rto/', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const html = await response.text();
+      setLoading(false);
+
+      if (html.includes('Resultado de la consulta')) {
+        const matchEstado = html.match(/Resultado:\s*([^<]+)/);
+        let estado = matchEstado ? matchEstado[1].trim() : "Desconocido";
+
+        const matchFecha = html.match(/Fecha Vencimiento:\s*(\d{2}\/\d{2}\/\d{4})/);
+        let vencimiento = matchFecha ? matchFecha[1] : "No figura";
+
+        const matchCert = html.match(/Certificado:\s*([^<]+)/);
+        let certificado = matchCert ? matchCert[1].trim() : "-";
+
+        Alert.alert(
+            "📋 INFORME RTO",
+            `Dominio: ${patente.toUpperCase()}\n\n` +
+            `🔹 ESTADO: ${estado.toUpperCase()}\n` +
+            `📅 VENCIMIENTO: ${vencimiento}\n` +
+            `📄 CERTIFICADO: ${certificado}\n\n` +
+            `(Fuente: CENT UTN)`
+        );
+      } else {
+        Alert.alert("⚠️ SIN DATOS", "No se encontraron registros de RTO Nacional.");
+      }
+    } catch (error) {
+      setLoading(false);
+      Alert.alert("Error", "No se pudo conectar con UTN.");
     }
-    
-    if(type === 'gmail') {
-        // También copiamos en Gmail por las dudas, es muy útil
-        await Clipboard.setStringAsync(p);
-        Linking.openURL(LINKS.gmail_base + p);
+  };
+
+// LOGICA HABILITACION (CON LEASING, RESOLUCION Y PRECARIO)
+  const verificarHabilitacion = async () => {
+    if (!patente) return Alert.alert("Atención", "Escribí una patente primero.");
+    setLoading(true);
+
+    try {
+      const SHEET_ID = '1qg0v-XobD3IavyObK4gVBNB56bNm6kPcDqMbpGzhZvM';
+      const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv`;
+
+      console.log("Consultando:", SHEET_URL);
+
+      const response = await fetch(SHEET_URL);
+      const data = await response.text();
+
+      if (data.includes('<!DOCTYPE html>')) {
+        setLoading(false);
+        return Alert.alert("Error", "La hoja no está pública. Revisá los permisos.");
+      }
+
+      const lineas = data.split('\n');
+      const patenteBuscada = patente.toUpperCase().replace(/\s+/g, '').trim();
+
+      const encontrado = lineas.find(linea => {
+        const columnas = linea.split(',');
+        if (columnas.length < 4) return false; 
+        const dominioExcel = columnas[3].toUpperCase().replace(/\s+/g, '').trim();
+        return dominioExcel === patenteBuscada;
+      });
+
+      setLoading(false);
+
+      if (encontrado) {
+        const col = encontrado.split(',');
+        
+        // --- DATOS GENERALES ---
+        const empresa = col[0] || 'Desconocida';
+        const modalidad = col[1] || '-';
+        const tipoChapa = col[4] || '-'; 
+        
+        // --- FECHAS Y TIPOS ---
+        const fechaResolucion = col[6] ? col[6].trim() : ''; 
+        const permisoInicio = col[7] || '';        
+        const permisoFin = col[8] || '';           
+        
+        const fechaVtoContrato = col[9] ? col[9].trim() : ''; // Columna J
+        const tipoContrato = col[10] ? col[10].toUpperCase().trim() : ''; // Columna K (LEASING)
+
+        // --- CEREBRO DE DECISIÓN (PRIORIDADES) ---
+        let textoVigencia = "";
+
+        // 1. PRIORIDAD: LEASING
+        // Si dice "LEASING" en la columna K y tiene fecha en la J
+        if (tipoContrato.includes('LEASING') && fechaVtoContrato.length > 5 && !fechaVtoContrato.includes('--')) {
+             textoVigencia = `🤝 CONTRATO LEASING\n⏳ Vence: ${fechaVtoContrato}`;
+        }
+        // 2. PRIORIDAD: RESOLUCIÓN REGULAR
+        // Si tiene fecha de resolución y NO es un guión
+        else if (fechaResolucion && fechaResolucion.length > 5 && !fechaResolucion.includes('--')) {
+             textoVigencia = `📅 Resolución: ${fechaResolucion}`;
+        }
+        // 3. PRIORIDAD: PRECARIO
+        // Si falla todo lo anterior, mostramos fechas de permiso
+        else {
+             textoVigencia = `⚠️ PERMISO PRECARIO\n▶ Inicio: ${permisoInicio}\n⏹ Vence: ${permisoFin}`;
+        }
+
+        Alert.alert(
+            "✅ UNIDAD HABILITADA", 
+            `🏢 Empresa: ${empresa}\n` +
+            `📋 Modalidad: ${modalidad}\n` + 
+            `🔢 Tipo Chapa: ${tipoChapa}\n\n` +
+            `${textoVigencia}`
+        );
+
+      } else {
+        Alert.alert("⚠️ NO FIGURA", `El dominio ${patenteBuscada} no se encuentra en el padrón activo.`);
+      }
+
+    } catch (error) {
+      setLoading(false);
+      Alert.alert("Error", "No se pudo conectar con la base de datos.");
     }
   };
     
+// --- FUNCION ANTECEDENTES (Busca en la lista de infracciones) ---
+  const verificarAntecedentes = async () => {
+    if (!patente) return Alert.alert("Atención", "Escribí una patente primero.");
+    setLoading(true);
+
+    try {
+      // ⚠️ REEMPLAZAR ESTO CON EL ID DE TU HOJA DE "ANTECEDENTES"
+      const SHEET_ID_ANTECEDENTES = '1KzKUy6gUYSGBf4DNnFokzqIMc2hLWQ63db5Js4S34p0';
+      const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID_ANTECEDENTES}/export?format=csv`;
+
+      console.log("Buscando antecedentes en:", SHEET_URL);
+
+      const response = await fetch(SHEET_URL);
+      const data = await response.text();
+
+      // Verificamos si Google nos devolvió una web de login en vez de datos
+      if (data.includes('<!DOCTYPE html>')) {
+        setLoading(false);
+        return Alert.alert("Error de Permisos", "La hoja de antecedentes no es pública. Revisá 'Compartir > Publicar en la web'.");
+      }
+
+      const lineas = data.split('\n');
+      const patenteBuscada = patente.toUpperCase().replace(/\s+/g, '').trim();
+      const resultados = [];
+
+      // Recorremos TODAS las líneas (porque puede haber varias multas para una misma patente)
+      lineas.forEach((linea, index) => {
+        const col = linea.split(',');
+        
+        // Si la línea está vacía o es muy corta, la saltamos
+        if (col.length < 2) return;
+        
+        // Asumimos Columna A (Indice 0) es el Dominio
+        const dominioExcel = col[0].toUpperCase().replace(/\s+/g, '').trim();
+        
+        if (dominioExcel === patenteBuscada) {
+          // Guardamos los datos en un objeto limpio
+          resultados.push({
+            id: index.toString(), // Un ID único para la lista
+            fecha: col[1] || '-',
+            acta: col[2] || '-',
+            estado: col[3] || 'Desconocido', // SUBSANA, INFRACCIÓN, ETC
+            tipo: col[4] || '-',
+            lugar: col[5] || '-',
+            link: col[6] ? col[6].trim() : '' // El Link al PDF
+          });
+        }
+});
+
+      // --- INICIO CÓDIGO NUEVO: ORDENAR Y CORTAR ---
+      
+      // 1. Ordenar: Convierte "03/01/2026" a objeto fecha real para comparar bien
+      resultados.sort((a, b) => {
+        const partsA = a.fecha.split('/'); // separa dia, mes, año
+        const dateA = new Date(partsA[2], partsA[1] - 1, partsA[0]);
+        
+        const partsB = b.fecha.split('/');
+        const dateB = new Date(partsB[2], partsB[1] - 1, partsB[0]);
+        
+        return dateB - dateA; // Orden descendente (más nuevo arriba)
+      });
+
+      // 2. Cortar: Nos quedamos solo con las primeras 5
+      const resultadosTop5 = resultados.slice(0, 5);
+      
+      // --- FIN CÓDIGO NUEVO ---
+
+      setLoading(false);
+
+      if (resultadosTop5.length > 0) {
+        // ¡Encontramos multas! Guardamos la lista FILTRADA y abrimos la ventana
+        setListaAntecedentes(resultadosTop5);
+        setModalVisible(true); 
+      } else {
+        Alert.alert("Sin Antecedentes", `El dominio ${patenteBuscada} no registra actas en esta base.`);
+      } else {
+        Alert.alert("Sin Antecedentes", `El dominio ${patenteBuscada} no registra actas en esta base.`);
+      }
+
+    } catch (error) {
+      setLoading(false);
+      console.error(error);
+      Alert.alert("Error", "No se pudo leer la base de antecedentes.");
+    }
+  };
+
+  // LOGICA BIBLIOTECA
+  const abrirBiblioteca = () => {
+    const linkBiblioteca = 'https://drive.google.com/drive/folders/1kWVzVJLptvLf8U4B_jPmuaygkDhIz5Fg?usp=sharing'; 
+    Linking.openURL(linkBiblioteca);
+  };
+
+  const usarHistorial = (texto) => setPatente(texto);
+
   return (
     <ScrollView style={styles.scroll}>
+      
       <View style={styles.toolSection}>
         <View style={styles.toolHeader}>
-            <Ionicons name="bus" size={28} color={COLORS.primary} />
-            <Text style={styles.toolTitle}>Buscador de Antecedentes</Text>
+            <Ionicons name="construct" size={28} color={COLORS.primary} />
+            <Text style={styles.toolTitle}>Centro de Control</Text>
         </View>
         
         <View style={styles.inputContainerBig}>
             <TextInput 
-            style={styles.inputBig} 
-            placeholder="AAA123" 
-            value={patente}
-            onChangeText={text => setPatente(text.toUpperCase())}
-            textAlign="center"
-            maxLength={9}
-            placeholderTextColor="#cbd5e1"
+              style={styles.inputBig} 
+              placeholder="AAA123" 
+              value={patente}
+              onChangeText={text => setPatente(text.toUpperCase())}
+              textAlign="center"
+              maxLength={9}
+              placeholderTextColor="#cbd5e1"
             />
         </View>
+
+        {historial.length > 0 && (
+          <View style={{flexDirection: 'row', justifyContent: 'center', marginBottom: 20, gap: 10, marginTop: 10}}>
+            {historial.map((item, index) => (
+              <TouchableOpacity key={index} onPress={() => usarHistorial(item)} style={{backgroundColor: '#e2e8f0', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: '#cbd5e1', flexDirection: 'row', alignItems: 'center'}}>
+                <Ionicons name="time-outline" size={14} color={COLORS.textLight} style={{marginRight: 4}}/>
+                <Text style={{color: COLORS.secondary, fontWeight: 'bold', fontSize: 12}}>{item}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
         
-        <View style={styles.gridButtons}>
-          <TouchableOpacity style={[styles.bigBtn, {backgroundColor: '#b91c1c'}]} onPress={() => handleSearch('drive')}>
-            <Ionicons name="logo-google" size={32} color="white" />
-            <Text style={styles.bigBtnText}>BUSCAR EN DRIVE</Text>
-            <Text style={styles.bigBtnSub}>Copia y busca actas</Text>
-          </TouchableOpacity>
+        <View style={{gap: 15}}>
+        
+{/* BOTÓN ANTECEDENTES (Estilo Unificado) */}
+        <TouchableOpacity 
+          style={{
+            flexDirection: 'row', 
+            alignItems: 'center', 
+            padding: 15, 
+            borderRadius: 12, 
+            backgroundColor: '#475569', // Gris oscuro azulado (Slate-600)
+            elevation: 3,
+            marginTop: 10
+          }} 
+          onPress={verificarAntecedentes}
+        >
+          {/* Ícono de la izquierda */}
+          <View style={{width: 40, alignItems: 'center'}}>
+            <Ionicons name="folder-open" size={24} color="white" />
+          </View>
           
-          <TouchableOpacity style={[styles.bigBtn, {backgroundColor: '#1f2937'}]} onPress={() => handleSearch('gmail')}>
-            <Ionicons name="mail" size={32} color="white" />
-            <Text style={styles.bigBtnText}>BUSCAR EN GMAIL</Text>
-            <Text style={styles.bigBtnSub}>Historial de correos</Text>
+          {/* Textos */}
+          <View style={{flex: 1}}>
+            <Text style={{color: 'white', fontWeight: 'bold', fontSize: 16}}>
+              VER ANTECEDENTES
+            </Text>
+            <Text style={{color: 'rgba(255,255,255,0.8)', fontSize: 12}}>
+              Historial de actas e infracciones
+            </Text>
+          </View>
+          
+          {/* Flechita o Spinner de carga */}
+          {loading ? (
+            <ActivityIndicator color="white"/> 
+          ) : (
+            <Ionicons name="chevron-forward" size={24} color="white" opacity={0.5} />
+          )}
+        </TouchableOpacity>
+
+          <TouchableOpacity style={{flexDirection: 'row', alignItems: 'center', padding: 15, borderRadius: 12, backgroundColor: COLORS.secondary, elevation: 3}} onPress={verificarHabilitacion}>
+            <View style={{width: 40, alignItems: 'center'}}><Ionicons name="checkmark-circle" size={24} color="white" /></View>
+            <View style={{flex: 1}}>
+              <Text style={{color: 'white', fontWeight: 'bold', fontSize: 16}}>VERIFICAR HABILITACIÓN</Text>
+              <Text style={{color: 'rgba(255,255,255,0.8)', fontSize: 12}}>Consulta padrón local</Text>
+            </View>
+            {loading ? <ActivityIndicator color="white"/> : <Ionicons name="chevron-forward" size={24} color="white" opacity={0.5} />}
+          </TouchableOpacity>
+
+          <TouchableOpacity style={{flexDirection: 'row', alignItems: 'center', padding: 15, borderRadius: 12, backgroundColor: '#0ea5e9', elevation: 3}} onPress={consultarRTO}>
+            <View style={{width: 40, alignItems: 'center'}}><Ionicons name="car-sport" size={24} color="white" /></View>
+            <View style={{flex: 1}}>
+              <Text style={{color: 'white', fontWeight: 'bold', fontSize: 16}}>CONSULTAR RTO</Text>
+              <Text style={{color: 'rgba(255,255,255,0.8)', fontSize: 12}}>Consulta directa a CENT UTN</Text>
+            </View>
+            {loading ? <ActivityIndicator color="white"/> : <Ionicons name="wifi" size={24} color="white" opacity={0.5} />}
           </TouchableOpacity>
         </View>
       </View>
 
-      <View style={styles.toolSection}>
+      <View style={[styles.toolSection, {marginTop: 20}]}>
         <View style={styles.toolHeader}>
-            <Ionicons name="library" size={28} color={COLORS.secondary} />
+            <Ionicons name="library" size={28} color={COLORS.textDark} />
             <Text style={styles.toolTitle}>Biblioteca Normativa</Text>
         </View>
-        <TouchableOpacity style={styles.wideBtn} onPress={() => Linking.openURL(LINKS.drive_normativa)}>
-          <View style={{flexDirection:'row', alignItems:'center'}}>
-              <Ionicons name="folder-open" size={18} color={COLORS.secondary} />
-              <Text style={styles.wideBtnText}>ACCEDER A BIBLIOTECA</Text>
-          </View>
-          <Ionicons name="arrow-forward" size={20} color={COLORS.secondary} />
+        
+        <TouchableOpacity 
+            style={{
+                flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                padding: 16, backgroundColor: '#f1f5f9', borderRadius: 12, borderWidth: 1, borderColor: '#e2e8f0'
+            }}
+            onPress={abrirBiblioteca}
+        >
+            <View style={{flexDirection: 'row', alignItems: 'center', gap: 10}}>
+                <View style={{backgroundColor: 'white', padding: 8, borderRadius: 8}}>
+                    <Ionicons name="book" size={20} color={COLORS.textDark} />
+                </View>
+                <Text style={{fontWeight: 'bold', color: COLORS.textDark, fontSize: 15}}>ACCEDER A BIBLIOTECA</Text>
+            </View>
+            <Ionicons name="arrow-forward" size={20} color={COLORS.textDark} />
         </TouchableOpacity>
       </View>
 
@@ -1941,7 +2205,106 @@ function ScreenHerramientas() {
         <Text style={styles.creditsSub}>Cba - 2025</Text>
       </View>
 
-      <View style={{height: 100}} /> 
+<View style={{height: 100}} /> 
+
+      {/* --- MODAL (VENTANA EMERGENTE) DE ANTECEDENTES --- */}
+      {/* PEGAR ESTO ANTES DE QUE CIERRE EL SCROLLVIEW */}
+      <Modal
+        animationType="slide"
+        transparent={true}
+        visible={modalVisible}
+        onRequestClose={() => setModalVisible(false)}
+      >
+        <View style={{
+          flex: 1,
+          justifyContent: 'center',
+          alignItems: 'center',
+          backgroundColor: 'rgba(0,0,0,0.6)', // Fondo oscurecido
+        }}>
+          <View style={{
+            width: '90%',
+            height: '80%', // Ocupa el 80% de la pantalla
+            backgroundColor: 'white',
+            borderRadius: 20,
+            padding: 20,
+            elevation: 10,
+          }}>
+            {/* Encabezado del Modal */}
+            <Text style={{fontSize: 22, fontWeight: 'bold', color: '#333', textAlign: 'center'}}>
+              📋 Historial de Actas
+            </Text>
+            <Text style={{fontSize: 16, color: '#666', textAlign: 'center', marginBottom: 15}}>
+              Dominio: {patente.toUpperCase()}
+            </Text>
+            
+            {/* Lista de Multas */}
+            <FlatList
+              data={listaAntecedentes}
+              keyExtractor={item => item.id}
+              renderItem={({ item }) => (
+                <View style={{
+                  backgroundColor: '#f8fafc',
+                  padding: 15,
+                  borderRadius: 10,
+                  marginBottom: 10,
+                  borderLeftWidth: 5,
+                  // Color del borde según el estado (Rojo si es infracción, Verde si cumple)
+                  borderLeftColor: item.estado.toUpperCase().includes('INFRAC') ? '#ef4444' : '#10b981'
+                }}>
+                  <View style={{flexDirection: 'row', justifyContent: 'space-between'}}>
+                    <Text style={{fontWeight: 'bold', color: '#64748b'}}>📅 {item.fecha}</Text>
+                    <Text style={{fontWeight: 'bold', color: '#333'}}>#{item.acta}</Text>
+                  </View>
+                  
+                  <Text style={{fontSize: 15, color: '#334155', marginTop: 5}}>📍 {item.lugar}</Text>
+                  <Text style={{fontSize: 14, color: '#64748b'}}>🔧 {item.tipo}</Text>
+                  
+                  <Text style={{
+                    fontWeight: '900', 
+                    fontSize: 14, 
+                    marginTop: 5, 
+                    textTransform: 'uppercase',
+                    color: item.estado.toUpperCase().includes('INFRAC') ? '#ef4444' : '#059669'
+                  }}>
+                    {item.estado}
+                  </Text>
+
+                  {/* Botón VER PDF (Solo si hay link) */}
+                  {item.link && item.link.includes('http') && (
+                    <TouchableOpacity 
+                      style={{
+                        marginTop: 10,
+                        backgroundColor: '#3b82f6', // Azul
+                        padding: 8,
+                        borderRadius: 5,
+                        alignItems: 'center',
+                      }}
+                      onPress={() => Linking.openURL(item.link)}
+                    >
+                      <Text style={{color: 'white', fontWeight: 'bold'}}>👁 VER PDF</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
+            />
+
+            {/* Botón CERRAR */}
+            <TouchableOpacity
+              style={{
+                backgroundColor: '#ef4444',
+                padding: 12,
+                borderRadius: 10,
+                alignItems: 'center',
+                marginTop: 10
+              }}
+              onPress={() => setModalVisible(false)}
+            >
+              <Text style={{color: 'white', fontWeight: 'bold'}}>CERRAR</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
     </ScrollView>
   );
 }
