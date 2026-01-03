@@ -2068,8 +2068,6 @@ function ScreenHerramientas() {
         setModalVisible(true); 
       } else {
         Alert.alert("Sin Antecedentes", `El dominio ${patenteBuscada} no registra actas en esta base.`);
-      } else {
-        Alert.alert("Sin Antecedentes", `El dominio ${patenteBuscada} no registra actas en esta base.`);
       }
 
     } catch (error) {
